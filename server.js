@@ -12,6 +12,14 @@ const {spawn, spawnSync} = require('node:child_process');
 const PORT = Number(process.env.PORT || 3000);
 const ROOT = __dirname;
 const KEY = process.env.GOOGLE_TRANSLATE_API_KEY || '';
+const MYMEMORY_CONTACT_EMAIL = process.env.MYMEMORY_CONTACT_EMAIL || '';
+// Free public translation is useful for occasional testing, but not guaranteed.
+// Distinguish temporary provider errors from faults in the Render app.
+class TranslationError extends Error {
+  constructor(message,status=503,retryAfter=0){super(message);this.status=status;this.retryAfter=retryAfter}
+}
+let freeUnavailableUntil=0;
+let freeUnavailableReason='';
 // Install eSpeak NG in the Docker image. Classic eSpeak is supported for local testing.
 const SPEECH_BIN = ['espeak-ng','espeak'].find(bin => {try{return spawnSync(bin,['--voices'],{encoding:'utf8',timeout:3000}).status === 0}catch{return false}}) || null;
 const FFMPEG_BIN = spawnSync('ffmpeg',['-version'],{encoding:'utf8',timeout:3000}).status === 0 ? 'ffmpeg' : null;
@@ -83,31 +91,65 @@ function respond(res,code,data){res.writeHead(code,{'Content-Type':'application/
 async function readBody(req){let data='';for await(const chunk of req){data+=chunk;if(data.length>25000)throw Error('Message is too large')}return JSON.parse(data)}
 function decode(s){return String(s||'').replace(/&#(\d+);/g,(_,n)=>String.fromCodePoint(Number(n))).replace(/&#x([\da-f]+);/gi,(_,n)=>String.fromCodePoint(parseInt(n,16))).replace(/&(?:amp|lt|gt|quot|apos|#39);/g,t=>({'&amp;':'&','&lt;':'<','&gt;':'>','&quot;':'"','&apos;':"'",'&#39;':"'"}[t]))}
 async function translateGoogle(texts,source,target){
-  const response=await fetch('https://translation.googleapis.com/language/translate/v2?key='+encodeURIComponent(KEY),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({q:texts,source,target,format:'text'}),signal:AbortSignal.timeout(18000)});
-  const data=await response.json();
-  if(!response.ok)throw Error(data.error?.message||'Google Cloud Translation is unavailable');
+  let response;
+  try{
+    response=await fetch('https://translation.googleapis.com/language/translate/v2?key='+encodeURIComponent(KEY),{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({q:texts,source,target,format:'text'}),signal:AbortSignal.timeout(18000)
+    });
+  }catch(e){throw new TranslationError('Cloud translation could not be reached. Please try again.',503)}
+  let data={};try{data=await response.json()}catch(e){}
+  if(!response.ok){
+    // Configuration, quotas and unsupported languages need different guidance.
+    if(response.status===429)throw new TranslationError('Cloud translation has reached its usage limit. Please contact staff.',429);
+    if(response.status===400)throw new TranslationError('Google could not translate this language pair. Please choose another.',422);
+    if(response.status===401||response.status===403)throw new TranslationError('Cloud translation needs the API key or billing settings checked in Render.',503);
+    throw new TranslationError('Cloud translation is temporarily unavailable.',503);
+  }
   const translations=data.data?.translations?.map(x=>decode(x.translatedText));
-  if(!Array.isArray(translations)||translations.length!==texts.length)throw Error('Translation response was incomplete');
+  if(!Array.isArray(translations)||translations.length!==texts.length)throw new TranslationError('Cloud translation returned an incomplete result.',503);
   return translations;
 }
 async function freeOne(text,source,target){
-  const u=new URL('https://api.mymemory.translated.net/get');u.searchParams.set('q',text);u.searchParams.set('langpair',source+'|'+target);
-  const response=await fetch(u,{signal:AbortSignal.timeout(15000)});
-  if(!response.ok)throw Error('Free translation provider unavailable');
-  const data=await response.json();const out=decode(data.responseData?.translatedText);
-  if(Number(data.responseStatus||200)!==200||!out||/MYMEMORY WARNING|QUERY LENGTH LIMIT/i.test(out))throw Error(data.responseDetails||'This language pair is not supported by the free provider');
+  if(Date.now()<freeUnavailableUntil)throw new TranslationError(freeUnavailableReason,429,Math.ceil((freeUnavailableUntil-Date.now())/1000));
+  const u=new URL('https://api.mymemory.translated.net/get');
+  u.searchParams.set('q',text);u.searchParams.set('langpair',source+'|'+target);
+  // Optional contact email can improve the free public provider's quota.
+  if(MYMEMORY_CONTACT_EMAIL)u.searchParams.set('de',MYMEMORY_CONTACT_EMAIL);
+  let response;
+  try{response=await fetch(u,{signal:AbortSignal.timeout(12000)})}
+  catch(e){throw new TranslationError('The free translation provider is unreachable. Please try again later, or ask staff to configure Cloud Translation.',503)}
+  let data={};try{data=await response.json()}catch(e){}
+  const details=String(data.responseDetails||'');
+  const out=decode(data.responseData?.translatedText);
+  const issue=[details,out].join(' ');
+  const responseStatus=Number(data.responseStatus||response.status);
+  if(response.status===429||responseStatus===429||/quota|rate limit|too many requests|daily limit|MYMEMORY WARNING/i.test(issue)){
+    freeUnavailableUntil=Date.now()+60*1000;
+    freeUnavailableReason='The free translation provider has reached a limit. Please try again later, or ask staff to enable Cloud Translation.';
+    throw new TranslationError(freeUnavailableReason,429,60);
+  }
+  if(!response.ok||response.status>=500||responseStatus>=500)throw new TranslationError('The free translation provider is temporarily unavailable. Please try again.',503);
+  if(responseStatus===403||responseStatus===401){
+    freeUnavailableUntil=Date.now()+60*1000;
+    freeUnavailableReason='The free translation provider is refusing requests from this server. Ask staff to enable Cloud Translation.';
+    throw new TranslationError(freeUnavailableReason,503,60);
+  }
+  if(responseStatus!==200||!out||/INVALID LANGUAGE|INVALID LANGUAGE PAIR|LANGPAIR/i.test(issue))throw new TranslationError('The free provider does not support this language pair. Please choose another, or enable Cloud Translation.',422);
+  if(/QUERY LENGTH LIMIT/i.test(issue))throw new TranslationError('This message is too long for free translation. Try a shorter message.',422);
   return out;
 }
 function splitText(text,max=410){const chunks=[];let left=text;while(left.length>max){let at=Math.max(left.lastIndexOf(' ',max),left.lastIndexOf('\n',max));if(at<max*.6)at=max;chunks.push(left.slice(0,at));left=left.slice(at).trimStart()}if(left)chunks.push(left);return chunks}
 async function translateFree(texts,source,target){
   const results=[];
-  // The free service has a strict text length limit and is unsuitable for large volumes.
+  // Use the public provider only on explicit requests; the frontend no longer
+  // floods it with automatic 54-cell Talker translations.
   for(const text of texts){const chunks=splitText(text);const parts=[];for(const chunk of chunks)parts.push(await freeOne(chunk,source,target));results.push(parts.join(' '))}
   return results;
 }
 const server=http.createServer(async(req,res)=>{
   const url=new URL(req.url||'/',`http://${req.headers.host||'localhost'}`);
-  if(url.pathname==='/api/status'&&req.method==='GET')return respond(res,200,{app:'language-bridge',provider:KEY?'google':'free',speechAvailable:!!SPEECH_BIN,audioFormat:FFMPEG_BIN?'mp3':'wav',voiceCodes:[...SPEECH_VOICES]});
+  if(url.pathname==='/api/status'&&req.method==='GET')return respond(res,200,{app:'language-bridge',version:'1.4',provider:KEY?'google':'free',freeProviderStatus:Date.now()<freeUnavailableUntil?'limited':'unknown',speechAvailable:!!SPEECH_BIN,audioFormat:FFMPEG_BIN?'mp3':'wav',voiceCodes:[...SPEECH_VOICES]});
   if(url.pathname==='/api/speech'){
     if(req.method!=='POST')return respond(res,405,{error:'Use POST'});
     try{
@@ -130,7 +172,12 @@ const server=http.createServer(async(req,res)=>{
       if(typeof source!=='string'||typeof target!=='string'|| !/^[A-Za-z]{2,3}(?:-[A-Za-z]{2,5})?$/.test(source)|| !/^[A-Za-z]{2,3}(?:-[A-Za-z]{2,5})?$/.test(target))return respond(res,400,{error:'Invalid language selection.'});
       const translations=source===target?texts:KEY?await translateGoogle(texts,source,target):await translateFree(texts,source,target);
       return respond(res,200,{translations,provider:KEY?'google':'free'});
-    }catch(e){return respond(res,502,{error:String(e.message||'Translation unavailable')})}
+    }catch(e){
+      const status=e instanceof TranslationError?e.status:503;
+      console.warn('[translation]',KEY?'google':'free','HTTP',status,String(e.message||'unavailable').slice(0,180));
+      if(e.retryAfter)res.setHeader('Retry-After',String(e.retryAfter));
+      return respond(res,status,{error:String(e.message||'Translation unavailable'),code:status===429?'LIMIT':status===422?'UNSUPPORTED':'PROVIDER_UNAVAILABLE'});
+    }
   }
   if(req.method!=='GET'&&req.method!=='HEAD')return respond(res,405,{error:'Method not allowed'});
   let rel=decodeURIComponent(url.pathname);

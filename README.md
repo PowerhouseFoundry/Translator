@@ -1,4 +1,4 @@
-# POWERHOUSE LANGUAGE BRIDGE — v1.3
+# POWERHOUSE LANGUAGE BRIDGE — v1.4
 
 A separate West SILC Powerhouse communication and translation app, based on the uploaded **Tell Me** board. The original Symbol Talker and its data are unchanged.
 
@@ -61,3 +61,14 @@ Version 1.2 always selected the app-hosted eSpeak voice when one existed. This c
 To update an existing Render deployment, replace the app files in your existing GitHub repository with the contents of this ZIP and commit the changes. Render will redeploy automatically if Auto Deploy is enabled. Keep your existing Render environment variables and service; do not delete them. Try a hard reload / close and reopen the iPad app once Render reports Live.
 
 The standalone HTML is for local visual testing and device-based voices. It cannot include the Docker server speech engine.
+
+## v1.4 — translation reliability and Render 502 fix
+
+- Replaced the deprecated `apple-mobile-web-app-capable` meta tag with `mobile-web-app-capable`.
+- The old `/api/translate` code returned HTTP 502 for *every* third-party translation problem. It now distinguishes free-provider limits (429), unsupported language pairs (422), and unavailable services (503) with a useful message on screen. HTTP status alone cannot fix an unreliable third-party service.
+- The free mode no longer automatically makes dozens of translation requests when loading a Talker board. Instead, selecting a word translates it on demand. The board's untranslated labels remain English until translated. Full automatic board labelling requires the configured Cloud Translation provider.
+- Fixed the hosted app's error handling so a failed request doesn't silently launch another request directly from the iPad.
+- Added an optional `MYMEMORY_CONTACT_EMAIL` environment variable for the free provider; its availability and daily limits are outside our control. This setting should be a staff/organisation contact, never a learner address.
+- **Recommended for dependable daily classroom translation:** configure `GOOGLE_TRANSLATE_API_KEY` as a secret in Render's Environment section and enable Cloud Translation API v2 in Google Cloud. Google requires an account with billing enabled; its free monthly credit applies subject to current pricing, after which charges may apply. Do not paste keys into GitHub, frontend code or screenshots.
+- To update, replace files in your existing repository and commit. Don't delete or recreate the Render service, and keep the existing environment variables and files.
+- **Test**: visit `/api/status` and check `provider` (`google` or `free`). Then translate `Hello` from English to French; the app now displays the provider's issue when translation fails.

@@ -230,7 +230,10 @@ async function prepareBoardTranslations(words){
   if(language==='en')return;
   const missing=[...new Set(words.filter(x=>x&&x.trim()&&!wordCache[`en|${language}|${x}`]))];
   if(!missing.length)return;
-  // Translate visible vocabulary in small batches; translation results are cached only for board words.
+  // Avoid dozens of automatic requests to the limited free public service.
+  // When staff enable the Google API, the full board can be localised in batches.
+  // In free mode only an explicitly tapped word is translated.
+  if(state.serverProvider!=='google')return;
   let failures=0;
   const chunks=[];for(let i=0;i<missing.length;i+=7)chunks.push(missing.slice(i,i+7));
   for(const chunk of chunks){
@@ -289,23 +292,31 @@ async function freeMany(texts,source,target){
 }
 async function translateTexts(texts,source,target){
   if(source===target)return texts;
-  if(state.server){
+  // The hosted app always uses its own server. Do not send a second hidden
+  // request directly from the iPad after a server failure or flood the provider.
+  // Only the standalone local HTML file uses the public provider in-browser.
+  if(location.protocol!=='file:'){
+    let response;
     try{
-      const response=await fetchWithTimeout('/api/translate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({texts,source,target})},21000);
-      const data=await response.json();if(!response.ok)throw Error(data.error||'Translation server failed');
-      if(!Array.isArray(data.translations)||data.translations.length!==texts.length)throw Error('Unexpected server response');
-      return data.translations;
+      response=await fetchWithTimeout('/api/translate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({texts,source,target})},20000);
     }catch(e){
-      // Provider errors (e.g. unsupported Cantonese) should be displayed, not retried silently.
-      if(state.serverProvider==='google'||(e.name!=='AbortError'&&!(e instanceof TypeError)))throw e;
-      state.server=false;setProviderStatus();
+      if(e.name==='AbortError')throw Error('The translation request timed out. Please try again.');
+      throw Error('Cannot reach the translation server. Check that Render is Live and try again.');
     }
+    let data={};try{data=await response.json()}catch(e){}
+    if(!response.ok){
+      if(data?.error)throw Error(data.error);
+      if(response.status===429)throw Error('Translation limit reached. Please try again later.');
+      throw Error(`The translation service is unavailable (HTTP ${response.status}).`);
+    }
+    if(!Array.isArray(data.translations)||data.translations.length!==texts.length)throw Error('Translation server sent an incomplete response.');
+    return data.translations;
   }
   return freeMany(texts,source,target);
 }
 function setProviderStatus(){
-  $('serviceName').textContent=state.server?(state.serverProvider==='google'?'Cloud translation':'Free translation'):'Free translation';
-  $('serviceInfo').textContent=state.server&&state.serverProvider==='google'?'Enhanced language coverage · Online':'Online · Some languages have limited support';
+  $('serviceName').textContent=state.serverProvider==='google'?'Cloud translation':'Limited free translation';
+  $('serviceInfo').textContent=state.serverProvider==='google'?'Enhanced language coverage · Online':'Public service · daily limits may apply';
   $('serviceDot').classList.toggle('warning',state.serverProvider!=='google');
 }
 async function detectServer(){
@@ -331,7 +342,7 @@ async function doTranslate(){
   }catch(e){
     if(thisTicket!==state.translationTicket)return;
     state.translation='';$('translatedText').textContent='Translation unavailable';$('translatedText').classList.add('placeholder');
-    $('translationHelp').textContent=(e.name==='AbortError'?'The service timed out. Check your internet connection.':e.message)+'. Try again or use a supported language pair.';
+    $('translationHelp').textContent=e.message||'Translation could not be completed. Please try again.';
     markResult('SERVICE ERROR','error');showToast('Translation did not complete: '+(e.message||'please retry'));
   }finally{translating=false;refreshMessage()}
 }

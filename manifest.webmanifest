@@ -1,0 +1,9 @@
+{
+  "name": "West SILC Powerhouse Language Bridge",
+  "short_name": "Language Bridge",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f2f6f9",
+  "theme_color": "#0b172b",
+  "icons": [{"src":"assets/west-silc.png","sizes":"any","type":"image/png","purpose":"any"}]
+}

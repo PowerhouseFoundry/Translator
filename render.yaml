@@ -1,0 +1,5 @@
+services:
+  - type: web
+    name: powerhouse-language-bridge
+    runtime: docker
+    healthCheckPath: /api/status

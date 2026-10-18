@@ -1,0 +1,8 @@
+{
+  "name": "powerhouse-language-bridge",
+  "version": "1.2.0",
+  "private": true,
+  "description": "West SILC Powerhouse two-way AAC language translator",
+  "scripts": {"start": "node server.js"},
+  "engines": {"node": ">=20"}
+}

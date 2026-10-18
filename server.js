@@ -14,6 +14,7 @@ const ROOT = __dirname;
 const KEY = process.env.GOOGLE_TRANSLATE_API_KEY || '';
 // Install eSpeak NG in the Docker image. Classic eSpeak is supported for local testing.
 const SPEECH_BIN = ['espeak-ng','espeak'].find(bin => {try{return spawnSync(bin,['--voices'],{encoding:'utf8',timeout:3000}).status === 0}catch{return false}}) || null;
+const FFMPEG_BIN = spawnSync('ffmpeg',['-version'],{encoding:'utf8',timeout:3000}).status === 0 ? 'ffmpeg' : null;
 const SPEECH_VOICES = new Set(SPEECH_BIN ? spawnSync(SPEECH_BIN,['--voices'],{encoding:'utf8',timeout:3000}).stdout.split('\n').slice(1).map(line => line.trim().split(/\s+/)[1]).filter(Boolean) : []);
 const SPEECH_ALIASES = { 'zh-CN':['cmn','zh'], 'zh-TW':['cmn','zh'], 'yue':['yue','zh-yue'], 'pa-Arab':[], 'no':['nb','no'], 'tl':['fil','tl'], 'ckb':['ckb'], 'pt':['pt','pt-pt','pt-br'], 'fr':['fr-fr','fr'], 'en':['en-gb','en'], 'pa':['pa'] };
 function voiceForLanguage(lang) {
@@ -41,6 +42,40 @@ function generateWav(text,voice,speed) {
     child.on('close',code=>{if(code!==0||size<44||size>8*1024*1024)finish(Error('Speech generation failed: '+(err||'voice system not available')));else finish(null,Buffer.concat(chunks))});
     child.stdin.on('error',()=>{});
     child.stdin.end(text,'utf8');
+  });
+}
+// eSpeak NG writes 22.05 kHz streaming WAV with placeholder sizes.
+// Repair its header before decoding/conversion: malformed lengths can trip Safari.
+function repairWav(wav){
+  if(wav.length>=44 && wav.toString('ascii',0,4)==='RIFF' && wav.toString('ascii',8,12)==='WAVE'){
+    wav.writeUInt32LE(wav.length-8,4);
+    // Look for the 'data' chunk rather than assuming a fixed 44-byte WAV header.
+    let at=12;
+    while(at+8<=wav.length){
+      const name=wav.toString('ascii',at,at+4);
+      if(name==='data'){wav.writeUInt32LE(wav.length-at-8,at+4);break}
+      const len=wav.readUInt32LE(at+4);
+      if(len>8*1024*1024||len===0)break;
+      at+=8+len+(len%2);
+    }
+  }
+  return wav;
+}
+// Encode server-side to a standard 44.1 kHz MP3. It is more forgiving on
+// Safari/iPad than eSpeak's raw low-rate WAV, although it cannot make the
+// synthesiser's naturally robotic pronunciation sound human.
+async function encodeSpeech(wav){
+  if(!FFMPEG_BIN)return {audio:wav,type:'audio/wav'};
+  return await new Promise((resolve)=>{
+    const child=spawn(FFMPEG_BIN,['-hide_banner','-loglevel','error','-f','wav','-i','pipe:0','-ar','44100','-ac','1','-codec:a','libmp3lame','-b:a','96k','-f','mp3','pipe:1'],{stdio:['pipe','pipe','pipe']});
+    const pieces=[];let size=0,settled=false;
+    const timer=setTimeout(()=>child.kill('SIGKILL'),7000);
+    const done=(ok)=>{if(settled)return;settled=true;clearTimeout(timer);resolve(ok&&size>64?{audio:Buffer.concat(pieces),type:'audio/mpeg'}:{audio:wav,type:'audio/wav'})};
+    child.stdout.on('data',c=>{size+=c.length;if(size>5*1024*1024){child.kill('SIGKILL');return}pieces.push(c)});
+    child.stdin.on('error',()=>{});
+    child.on('error',()=>done(false));
+    child.on('close',code=>done(code===0));
+    child.stdin.end(wav);
   });
 }
 const EXTENSIONS = {'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.png':'image/png','.ico':'image/x-icon','.svg':'image/svg+xml','.json':'application/json; charset=utf-8','.webmanifest':'application/manifest+json; charset=utf-8','.txt':'text/plain; charset=utf-8'};
@@ -72,7 +107,7 @@ async function translateFree(texts,source,target){
 }
 const server=http.createServer(async(req,res)=>{
   const url=new URL(req.url||'/',`http://${req.headers.host||'localhost'}`);
-  if(url.pathname==='/api/status'&&req.method==='GET')return respond(res,200,{app:'language-bridge',provider:KEY?'google':'free',speechAvailable:!!SPEECH_BIN,voiceCodes:[...SPEECH_VOICES]});
+  if(url.pathname==='/api/status'&&req.method==='GET')return respond(res,200,{app:'language-bridge',provider:KEY?'google':'free',speechAvailable:!!SPEECH_BIN,audioFormat:FFMPEG_BIN?'mp3':'wav',voiceCodes:[...SPEECH_VOICES]});
   if(url.pathname==='/api/speech'){
     if(req.method!=='POST')return respond(res,405,{error:'Use POST'});
     try{
@@ -81,14 +116,10 @@ const server=http.createServer(async(req,res)=>{
       const voice=voiceForLanguage(language);
       if(!voice||!SPEECH_BIN)return respond(res,422,{error:'No app-hosted voice is available for this language.'});
       const safeSpeed=Math.max(105,Math.min(230,Number(speed)||150));
-      const wav=await generateWav(text,voice,Math.round(safeSpeed));
-      // eSpeak streams provisional RIFF lengths (0x7ffff024). Correct them for iPad/Safari audio decoding.
-      if(wav.subarray(0,4).toString()==='RIFF'&&wav.subarray(8,12).toString()==='WAVE'){
-        wav.writeUInt32LE(wav.length-8,4);
-        if(wav.subarray(36,40).toString()==='data')wav.writeUInt32LE(wav.length-44,40);
-      }
-      res.writeHead(200,{'Content-Type':'audio/wav','Content-Length':wav.length,'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});
-      return res.end(wav);
+      const wav=repairWav(await generateWav(text,voice,Math.round(safeSpeed)));
+      const {audio,type}=await encodeSpeech(wav);
+      res.writeHead(200,{'Content-Type':type,'Content-Length':audio.length,'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});
+      return res.end(audio);
     }catch(e){return respond(res,503,{error:String(e.message||'Speech could not be generated')})}
   }
   if(url.pathname==='/api/translate'){

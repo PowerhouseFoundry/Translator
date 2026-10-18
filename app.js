@@ -14,7 +14,7 @@ const RTL = language => !!language?.rtl;
 const WORD_CACHE_KEY = 'powerhouseLanguageBridgeWordTranslations_v1';
 let wordCache = {};
 try{wordCache=JSON.parse(localStorage.getItem(WORD_CACHE_KEY)||'{}')||{}}catch(e){wordCache={}}
-const state = {source:'en',target:'fr',mode:'talker',section:'Core',question:'Who',tokens:[],translation:'',autoReady:false,server:false,serverProvider:'free',speechServer:false,serverVoices:[],renderTicket:0,translationTicket:0,caps:false};
+const state = {source:'en',target:'fr',voiceMode:'auto',mode:'talker',section:'Core',question:'Who',tokens:[],translation:'',autoReady:false,server:false,serverProvider:'free',speechServer:false,serverVoices:[],renderTicket:0,translationTicket:0,caps:false};
 let toastTimer, speechList=[],translating=false,activeUtterance=null,speechWatchdog=null,speechSession=0;
 let audioContext=null,activeAudioNode=null,speechRequest=null,activeSpeechButton=null;
 const html = str => String(str ?? '').replace(/[&<>"']/g, ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
@@ -69,10 +69,10 @@ function initSelects(){
       const opt=document.createElement('option');opt.value=l.code;opt.textContent=`${l.name} · ${l.native}`;select.lastElementChild.appendChild(opt);
     }
   }
-  try{const pref=JSON.parse(localStorage.getItem('languageBridgePreferences')||'{}');if(LANGUAGE[pref.source]&&LANGUAGE[pref.target]){state.source=pref.source;state.target=pref.target;state.mode=pref.mode==='type'?'type':'talker'}}catch(e){}
-  $('sourceLanguage').value=state.source;$('targetLanguage').value=state.target;
+  try{const pref=JSON.parse(localStorage.getItem('languageBridgePreferences')||'{}');if(LANGUAGE[pref.source]&&LANGUAGE[pref.target]){state.source=pref.source;state.target=pref.target;state.mode=pref.mode==='type'?'type':'talker';state.voiceMode=['auto','device','server'].includes(pref.voiceMode)?pref.voiceMode:'auto'}}catch(e){}
+  $('sourceLanguage').value=state.source;$('targetLanguage').value=state.target;$('voiceMode').value=state.voiceMode||'auto';
 }
-function rememberPrefs(){try{localStorage.setItem('languageBridgePreferences',JSON.stringify({source:state.source,target:state.target,mode:state.mode}))}catch(e){}}
+function rememberPrefs(){try{localStorage.setItem('languageBridgePreferences',JSON.stringify({source:state.source,target:state.target,mode:state.mode,voiceMode:state.voiceMode||'auto'}))}catch(e){}}
 function markResult(status='READY',type=''){$('resultBadge').textContent=status;$('resultBadge').className='translated-status'+(type?' '+type:'')}
 function invalidateResult(){if(activeSpeechButton)stopSpeech();state.translation='';state.translationTicket++;$('translatedText').textContent='Your translation will appear here.';$('translatedText').classList.add('placeholder');$('translationHelp').textContent='Press Translate message when you are ready.';$('speakResult').disabled=true;$('copyResult').disabled=true;$('replyButton').disabled=true;markResult('READY')}
 function updateLanguageUI(){
@@ -362,27 +362,38 @@ function hostedVoice(lang){
   const base=code.toLowerCase().split('-')[0];
   return state.serverVoices.find(v=>v.startsWith(base+'-'))||null;
 }
+// Use the iPad's natural-sounding installed voice before eSpeak NG.
+// eSpeak is a useful multilingual *backup*, but it deliberately sounds synthetic.
+function speechChoice(lang) {
+  const pref=state.voiceMode||'auto';
+  const device=findVoice(lang),hosted=hostedVoice(lang);
+  if(pref==='device')return device?{method:'device',voice:device}:{method:'none'};
+  if(pref==='server')return hosted?{method:'server',voice:hosted}:{method:'none'};
+  if(device)return {method:'device',voice:device};
+  if(hosted)return {method:'server',voice:hosted};
+  // getVoices() sometimes starts empty on Safari before voiceschanged.
+  // Allow its language-aware engine to attempt speech ONLY while enumeration is pending.
+  if(!speechList.length && 'speechSynthesis' in window)return {method:'device-unverified'};
+  return {method:'none'};
+}
 function refreshVoiceInfo(){
   if(!$('voiceInfo'))return;
-  const speaker=$('speakResult'),lang=selectedTarget();
-  const hosted=hostedVoice(lang),device=findVoice(lang);
-  if(hosted){
-    $('voiceInfo').textContent='Free app voice · no installation';
-    $('voiceHelp').textContent=lang.code==='ar'?'App-hosted Arabic speech may need vowel marks for accurate pronunciation. Translation and speech require internet.':
-      'App-hosted voices work on iPads without installing voices. Computer-generated pronunciation may vary. Internet is required.';
-  }else if(device){
-    $('voiceInfo').textContent=`Device voice: ${device.name}`;
-    $('voiceHelp').textContent='This language uses a device voice. Voice availability varies by iPad and browser.';
-  }else if('speechSynthesis' in window){
-    $('voiceInfo').textContent='Try device voice · may be unavailable';
-    $('voiceHelp').textContent=state.speechServer?'No app-hosted voice for this language. The device voice may work instead.':
-      'For built-in free voices on all iPads, deploy the complete app using its Dockerfile. This local file uses device voices.';
+  const lang=selectedTarget(),speaker=$('speakResult'),chosen=speechChoice(lang);
+  if(chosen.method==='device'){
+    $('voiceInfo').textContent=`iPad voice · ${chosen.voice.name}`;
+    $('voiceHelp').textContent='Using the device voice for clearer speech. If it sounds wrong, choose App backup under Voice.';
+  }else if(chosen.method==='device-unverified'){
+    $('voiceInfo').textContent='Checking device voices…';
+    $('voiceHelp').textContent='If the voice does not start, check that this language has a voice installed on your iPad.';
+  }else if(chosen.method==='server'){
+    $('voiceInfo').textContent='App backup voice · synthetic';
+    $('voiceHelp').textContent='This language is using a free synthetic backup voice. It can sound robotic. A matching iPad voice will sound clearer.';
   }else{
-    $('voiceInfo').textContent='No voice available for this language';
-    $('voiceHelp').textContent='Deploy the full hosted app to enable its free speech engine.';
+    $('voiceInfo').textContent='No matching voice available';
+    $('voiceHelp').textContent=state.voiceMode==='device'?'No matching iPad voice. Choose Best available or install a voice on this device.':state.voiceMode==='server'?'No hosted backup for this language. Choose Best available.':'No compatible voice for this language. You can still use the translated text.';
   }
-  speaker.disabled=!state.translation || (!hosted && !('speechSynthesis' in window));
-  speaker.title=hosted?'Hear speech generated by the app':device?'Hear the translation on this device':'Try speaking with this device';
+  speaker.disabled=!state.translation||chosen.method==='none';
+  speaker.title=chosen.method==='server'?'Hear speech from the app-hosted synthetic backup':chosen.method==='device'?'Hear a matching voice on this iPad':'Hear translated speech';
 }
 function speechReset(){
   clearTimeout(speechWatchdog);
@@ -429,7 +440,8 @@ async function sayHosted(text,lang,voice,buttonId,session,ctx){
   }catch(e){
     if(session!==speechSession||e.name==='AbortError')return;
     speechRequest=null;activeAudioNode=null;speechReset();
-    showToast('App speech unavailable. Check your connection, then tap Speak again.');
+    console.warn('Hosted speech playback failed:',e);
+    showToast('App voice could not play. Try iPad voice under Voice, or check your connection.');
   }
 }
 function sayOnDevice(text,lang,buttonId,session){
@@ -462,12 +474,14 @@ function say(text,lang,buttonId='speakResult'){
   stopSpeech();
   const session=++speechSession;
   activeSpeechButton=buttonId;
-  const voice=hostedVoice(lang);
-  // Limit speech messages to avoid very large generated audio on mobile devices.
-  if(voice){
+  const chosen=speechChoice(lang);
+  if(chosen.method==='none'){speechReset();return showToast('No matching '+(state.voiceMode==='device'?'iPad':'app')+' voice for '+lang.name+'. Try Best available under Voice.')}
+  // Limit hosted messages to keep playback quick on mobile devices.
+  if(chosen.method==='server'){
     if(text.length>500){speechReset();return showToast('Please shorten the message to 500 characters for speech.')}
     const ctx=startAudioContext();
-    if(ctx){sayHosted(text,lang,voice,buttonId,session,ctx);return}
+    if(ctx){sayHosted(text,lang,chosen.voice,buttonId,session,ctx);return}
+    speechReset();return showToast('The browser could not start audio. Try a device voice.')
   }
   sayOnDevice(text,lang,buttonId,session);
 }
@@ -514,6 +528,7 @@ function setUpEvents(){
     try{await navigator.clipboard.writeText(state.translation);showToast('Translated text copied.')}catch(e){showToast('Copy is unavailable here. Select and copy the translated text instead.')}
   });
   $('replyButton').addEventListener('click',()=>swapLanguages(true));
+  $('voiceMode').addEventListener('change',e=>{state.voiceMode=e.target.value;rememberPrefs();stopSpeech();refreshVoiceInfo()});
   $('speechRate').addEventListener('input',()=>{$('speechRateValue').textContent=Number($('speechRate').value)<.85?'Slow':Number($('speechRate').value)>1.04?'Fast':'Normal'});
   $('fullscreenBtn').addEventListener('click',toggleImmersive);
   document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='Enter'){e.preventDefault();doTranslate()}});

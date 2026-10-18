@@ -92,9 +92,9 @@
         <div class="result-controls">
           <button id="speakResult" type="button" class="speak-button" disabled><span class="sound-icon" aria-hidden="true">🔊</span><span><strong id="speakLabel">SPEAK TRANSLATION</strong><small id="voiceInfo">Checking voices on your device</small></span></button>
           <div class="mini-actions"><button id="copyResult" type="button" disabled>▤ <span id="copyLabel">Copy text</span></button><button id="replyButton" type="button" disabled>⇄ <span id="replyLabel">Reply in this language</span></button></div>
-          <div class="rate-control"><label for="speechRate">Speaking speed</label><input type="range" id="speechRate" min="0.65" max="1.15" value="0.9" step="0.05"><span id="speechRateValue">Normal</span></div>
+          <div class="rate-control"><label for="speechRate">Speed</label><input type="range" id="speechRate" min="0.65" max="1.15" value="0.9" step="0.05"><span id="speechRateValue">Normal</span></div><div class="voice-choice"><label for="voiceMode">Voice</label><select id="voiceMode" aria-label="Select speech engine"><option value="auto">Best available</option><option value="device">iPad / device</option><option value="server">App backup</option></select></div>
         </div>
-        <div class="result-bottom"><span class="result-bottom-icon">i</span><span id="voiceHelp">Translation requires internet. Free app-hosted voices are available in the Docker-deployed version.</span></div>
+        <div class="result-bottom"><span class="result-bottom-icon">i</span><span id="voiceHelp">Clearer voices are used automatically when available; app backup voices may sound robotic.</span></div>
       </section>
     </main>
     <footer class="footer"><span>WEST SILC POWERHOUSE · SPRINGFIELD COMMERCIAL CENTRE</span><span>Training tool · Internet needed for translation · Avoid entering private information</span></footer>
